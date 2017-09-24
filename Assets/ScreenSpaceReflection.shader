@@ -108,7 +108,6 @@ PIXEL_STRIDE是每次采样的间隔像素数量。越大，质量越低，但�
 				screenPCurrent += jitter * dScreenPCurrent;
 				float intersect = 0;
 				float prevDepth = 1 / (oneOverzCurrent + 0.1 * dOneOverZCurrent) / -_ProjectionParams.z;	//步进方向面向相机时，可能会因为z值精度问题出现鬼影
-#if 1
 				UNITY_LOOP
 				for (int i = 1; i <= STEP_COUNT && interpolationCounter <= 1; i++) {
 					oneOverzCurrent += dOneOverZCurrent;
@@ -146,24 +145,6 @@ PIXEL_STRIDE是每次采样的间隔像素数量。越大，质量越低，但�
 					}
 					prevDepth = screenPTrueDepth;
 				}
-#else
-				
-				UNITY_LOOP
-				for (int i = 1; i <= STEP_COUNT; i++) {
-					float3 p = start + (float)i/STEP_COUNT * RAY_LENGTH * direction ;
-					float pDepth = p.z / -_ProjectionParams.z;
-					float4 screenCoord = mul(unity_CameraProjection, float4(p,1));
-					screenCoord /= screenCoord.w;
-					if (screenCoord.x < -1 || screenCoord.y < -1 || screenCoord.x > 1 || screenCoord.y > 1)
-						return false;
-					float camDepth = Linear01Depth(tex2Dlod(_CameraDepthTexture, float4(screenCoord.xy / 2 + 0.5,0,0)));
-					if (pDepth > camDepth && pDepth < camDepth + 0.001 ) {
-						hitPixel = screenCoord.xy / 2 + 0.5;
-				//		debugCol = float3(hitPixel, 0);
-						return true;
-					}
-				}	 //view space ray trace
-#endif
 
 				alpha *= 1 - max(
 					(clamp(abs(screenPCurrent.x), SCREEN_EDGE_MASK,1.0) - SCREEN_EDGE_MASK) / (1 - SCREEN_EDGE_MASK),
