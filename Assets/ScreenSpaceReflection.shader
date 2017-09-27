@@ -6,15 +6,15 @@
 	}
 	SubShader
 	{
-		// No culling or depth
-		Cull Off ZWrite Off ZTest Always
+		Cull Off 
+		ZWrite Off
+		ZTest Always
 
 		Pass
 		{
 			CGPROGRAM
 			#pragma vertex vert
 			#pragma fragment frag
-			
 			#include "UnityCG.cginc"
 
 			struct appdata
@@ -37,8 +37,7 @@
 			sampler2D _CameraDepthTexture;
 			sampler2D _BackfaceTex;
 			float4x4 _Projection;
-			float4x4 _WorldToView;
-			float4x4 _InverseProjection; // different from UNITY_MATRIX_V, unity_CameraInvProjection just works,don't know why.
+			float4x4 _WorldToView;		//UNITY_MATRIX_V doesn't work here. We need to manually set from script. Don't know why :C
 			v2f vert (appdata v)
 			{
 				v2f o;
@@ -50,113 +49,123 @@
 				return o;
 			}
 
-			bool RayIntersect(float raya, float rayb, float2 sspt) {
-				float screenPCameraDepth = Linear01Depth(tex2Dlod(_CameraDepthTexture, float4(sspt / 2 + 0.5, 0, 0)));
-				float backZ = tex2Dlod(_BackfaceTex, float4(sspt / 2 + 0.5, 0, 0)).r;
+			#include "ScreenSpaceRaytrace.cginc"
+			/*
+#define RAY_LENGTH 40.0	//maximum ray length.
+#define STEP_COUNT 16	//maximum sample count.
+#define PIXEL_STRIDE 16 //sample multiplier. it's recommend 16 or 8.
+#define PIXEL_THICKNESS (0.03 * PIXEL_STRIDE)	//how thick is a pixel. correct value reduces noise.
 
+			bool RayIntersect(float raya, float rayb, float2 sspt) {
 				if (raya > rayb) {
 					float t = raya;
 					raya = rayb;
 					rayb = t;
 				}
-				return raya < backZ && rayb > screenPCameraDepth;
-			}
-/*
-RAY_LENGTH是采样光线的最大长度
-STEP_COUNT是最多的采样次数，超过采样次数会立刻返回
-PIXEL_STRIDE是每次采样的间隔像素数量。越大，质量越低，但是采样范围越大。
-*/
-#define RAY_LENGTH 40.0
-#define STEP_COUNT 32	//maximum sample count.
-#define PIXEL_STRIDE 8 //sample every 8 pixel.
-#define SCREEN_EDGE_MASK 0.9
 
-			bool traceRay(float3 start, float3 direction,float jitter, out float2 hitPixel,out float alpha,out float3 debugCol ) {
-				debugCol = 0;
-				alpha = 1;
+				float screenPCameraDepth = -LinearEyeDepth(tex2Dlod(_CameraDepthTexture, float4(sspt / 2 + 0.5, 0, 0)).r);
+				return raya < screenPCameraDepth && rayb > screenPCameraDepth - PIXEL_THICKNESS;
+			}
+
+			bool traceRay(float3 start, float3 direction, float jitter, float4 texelSize, out float2 hitPixel, out float marchPercent,out float hitZ) {
 				//clamp raylength to near clip plane.
 				float rayLength = ((start.z + direction.z * RAY_LENGTH) > -_ProjectionParams.y) ?
 					(-_ProjectionParams.y - start.z) / direction.z : RAY_LENGTH;
 
 				float3 end = start + direction * rayLength;
 
-				float4 H0 = mul(unity_CameraProjection, float4(start, 1));		//H0.xy / H0.w is in [-1,1]
+				float4 H0 = mul(unity_CameraProjection, float4(start, 1));
 				float4 H1 = mul(unity_CameraProjection, float4(end, 1));
 
 				float2 screenP0 = H0.xy / H0.w;
-				float2 screenP1 = H1.xy / H1.w;		//。屏幕空间的采样坐标。
+				float2 screenP1 = H1.xy / H1.w;	
 
-				float4 texelSize = _MainTex_TexelSize;
-				if (abs(dot(screenP1 - screenP0, screenP1 - screenP0)) < 1.0) {
+				float k0 = 1.0 / H0.w;
+				float k1 = 1.0 / H1.w;
+
+				float Q0 = start.z * k0;
+				float Q1 = end.z * k1;
+
+				if (abs(dot(screenP1 - screenP0, screenP1 - screenP0)) < 0.00001) {
 					screenP1 += texelSize.xy;
 				}
-				float2 deltaPixels = (screenP1 - screenP0) * texelSize.zw;	//屏幕上两点的像素间隔。
-				float step;	//线性插值的步长。/
-				step = min( 1 / abs(deltaPixels.y), 1 / abs(deltaPixels.x)); // 使每次采样都会间隔一个像素
-				step *= PIXEL_STRIDE;		//加大采样距离（加快插值进度）。 
-				float sampleScaler = 1.0 - min(1.0, -start.z / 100);	
-				step *= 1.0 + sampleScaler;				//距离较近时（不容易采偏），插值进度更快
+				float2 deltaPixels = (screenP1 - screenP0) * texelSize.zw;
+				float step;	//the sample rate.
+				step = min(1 / abs(deltaPixels.y), 1 / abs(deltaPixels.x)); //make at least one pixel is sampled every time.
 
-				float interpolationCounter = step;	//记录当前插值的进度。
+				//make sample faster.
+				step *= PIXEL_STRIDE;		
+				float sampleScaler = 1.0 - min(1.0, -start.z / 100); //sample is slower when far from the screen.
+				step *= 1.0 + sampleScaler;	
 
-				float oneOverzCurrent = 1 / start.z;
-				float2 screenPCurrent = screenP0;
+				float interpolationCounter = step;	//by default we use step instead of 0. this avoids some glitch.
 
-				float dOneOverZCurrent = step * (1 / end.z - 1 / start.z);
-				float2 dScreenPCurrent = step * (screenP1 - screenP0);
-				oneOverzCurrent += jitter * dOneOverZCurrent;
-				screenPCurrent += jitter * dScreenPCurrent;
-				float intersect = 0;
-				float prevDepth = 1 / (oneOverzCurrent + 0.1 * dOneOverZCurrent) / -_ProjectionParams.z;	//步进方向面向相机时，可能会因为z值精度问题出现鬼影
-				UNITY_LOOP
-				for (int i = 1; i <= STEP_COUNT && interpolationCounter <= 1; i++) {
-					oneOverzCurrent += dOneOverZCurrent;
-					screenPCurrent += dScreenPCurrent;
-					interpolationCounter += step;
-					float screenPTrueDepth = 1 / oneOverzCurrent/ -_ProjectionParams.z;
-					if (RayIntersect(screenPTrueDepth,prevDepth, screenPCurrent)){
-#if 1	  //binary search
-						float gapSize = PIXEL_STRIDE;
-						float2 screenPBegin = screenPCurrent - dScreenPCurrent;
-						float oneOverZBegin = oneOverzCurrent - dOneOverZCurrent;
-						prevDepth = 1 / oneOverZBegin / -_ProjectionParams.z;
-						UNITY_LOOP
-						for (int j = 1; j <= 8 && gapSize > 1.0; j++) {
-							gapSize /= 2;
-							dScreenPCurrent /= 2;
-							dOneOverZCurrent /= 2;
-							screenPCurrent = screenPBegin + dScreenPCurrent;
-							oneOverzCurrent = oneOverZBegin + dOneOverZCurrent;
-							screenPTrueDepth = 1 / oneOverzCurrent / -_ProjectionParams.z;
-							if (RayIntersect(screenPTrueDepth, prevDepth, screenPCurrent)) {		//命中了，不用动
-							}
-							else {							//没命中，往后压一压
-								prevDepth = screenPTrueDepth;
-								screenPBegin = screenPCurrent;
-								oneOverZBegin = oneOverzCurrent;
-							}
-						}	 
-#endif
-						hitPixel = (screenPCurrent) / 2 + 0.5;
-						intersect = 1;
-						alpha *= 1 - (float)i / STEP_COUNT;
-						debugCol = float3(hitPixel,0);
-						break;
+				float4 pqk = float4(screenP0, Q0, k0);
+				float4 dpqk = float4(screenP1 - screenP0, Q1 - Q0, k1 - k0) * step;
+
+				pqk += jitter * dpqk;
+
+				float prevZMaxEstimate = start.z;
+
+				bool intersected = false;
+				UNITY_LOOP		//the logic here is a little different from PostProcessing or (casual-effect). but it's all about raymarching.
+					for (int i = 1;
+						i <= STEP_COUNT && interpolationCounter <= 1 && !intersected;
+						i++,
+						interpolationCounter += step
+						) {
+					pqk += dpqk;
+					float rayZMin = prevZMaxEstimate;
+					float rayZMax = ( pqk.z) / ( pqk.w);
+
+					if (RayIntersect(rayZMin, rayZMax, pqk.xy - dpqk.xy / 2)) {
+						hitPixel = (pqk.xy - dpqk.xy / 2) / 2 + 0.5;
+						marchPercent = (float)i / STEP_COUNT;
+						intersected = true;
 					}
-					prevDepth = screenPTrueDepth;
+					else {
+						prevZMaxEstimate = rayZMax;
+					}
 				}
 
-				alpha *= 1 - max(
-					(clamp(abs(screenPCurrent.x), SCREEN_EDGE_MASK,1.0) - SCREEN_EDGE_MASK) / (1 - SCREEN_EDGE_MASK),
+#if 1	  //binary search
+				if (intersected) {
+					pqk -= dpqk;	//one step back
+					UNITY_LOOP
+						for (float gapSize = PIXEL_STRIDE; gapSize > 1.0; gapSize /= 2) {
+							dpqk /= 2;
+							float rayZMin = prevZMaxEstimate;
+							float rayZMax = (pqk.z) / ( pqk.w);
+
+							if (RayIntersect(rayZMin, rayZMax, pqk.xy - dpqk.xy / 2)) {		//hit, stay the same.(but ray length is halfed)
+
+							}
+							else {							//miss the hit. we should step forward
+								pqk += dpqk;
+								prevZMaxEstimate = rayZMax;
+							}
+						}
+					hitPixel = (pqk.xy - dpqk.xy / 2) / 2 + 0.5;
+				}
+#endif
+				hitZ = pqk.z / pqk.w;
+
+				return intersected;
+			}
+			*/
+#define SCREEN_EDGE_MASK 0.9
+			float alphaCalc(float3 rayDirection, float2 hitPixel, float marchPercent, float hitZ) {
+				float res = 1;
+				res *= saturate(-5 * (rayDirection.z - 0.2));
+				float2 screenPCurrent = 2 * (hitPixel - 0.5);
+				res *= 1 - max(
+					(clamp(abs(screenPCurrent.x), SCREEN_EDGE_MASK, 1.0) - SCREEN_EDGE_MASK) / (1 - SCREEN_EDGE_MASK),
 					(clamp(abs(screenPCurrent.y), SCREEN_EDGE_MASK, 1.0) - SCREEN_EDGE_MASK) / (1 - SCREEN_EDGE_MASK)
 				);
-				alpha *= intersect;
-				alpha *= (1 - saturate(2 * direction.z));
-				float farclipPlaneDist = 1 - (end.z / -_ProjectionParams.z);	//距离far clip plane的距离(0,1)
-				alpha *= saturate((farclipPlaneDist - 0.1) * 8);	//淡出距离far clip plane小于0.1的反射。
-				return false;
+				res *= 1 - marchPercent;
+				res *= 1 - (-(hitZ - 0.2) * _ProjectionParams.w);
+				return res;
 			}
-			
 
 			fixed4 frag (v2f i) : SV_Target
 			{
@@ -170,18 +179,26 @@ PIXEL_STRIDE是每次采样的间隔像素数量。越大，质量越低，但�
 				half3 reflection = 0;
 				float alpha = 0;
 
+				float3 reflectionDir = normalize(reflect(csRayOrigin, csNormal));
+
 				float2 uv2 = i.uv * _MainTex_TexelSize.zw;
 				float c = (uv2.x + uv2.y) * 0.25;
 				float jitter = fmod(c,1.0);
 
-				traceRay(
-						csRayOrigin, 
-						normalize(reflect(csRayOrigin, csNormal)),
-						jitter,
-						hitPixel,
-						alpha,
-					debugCol);
-				reflection = tex2D(_MainTex, hitPixel);
+				float marchPercent;
+				float hitZ;
+				float rayBump = max(-0.018*csRayOrigin.z, 0.001);
+				if (traceRay(
+					csRayOrigin + csNormal * rayBump,
+					reflectionDir,
+					jitter,
+					_MainTex_TexelSize,
+					hitPixel,
+					marchPercent,
+					hitZ)) {
+					alpha = alphaCalc(reflectionDir, hitPixel, marchPercent,hitZ);
+				}
+				reflection = tex2D(_MainTex, hitPixel);	
 				return tex2D(_MainTex, i.uv) + half4(reflection,1) * alpha;
 			}
 			ENDCG
