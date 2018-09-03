@@ -1,10 +1,12 @@
 ![emmmmmmm](Image.png)
 # Unity-Simple-SSR
 简单的SSR效果（屏幕空间反射）。基于Unity2017.1、DirectX。未在其他版本、平台测试，如果有问题请务必反馈。  
+没有优化，仅作学习参考目的。
 相关博客：http://www.cnblogs.com/yangrouchuan/p/7574405.html
 
 # Engligh ver
 A simple Screen Space Reflection effect for Untiy. Working on 2017.1 DirectX. If you have any problem please commit an issue!
+No optimizations are done, only for learning purpose.
 
 ## Feature
 1. screen space raytrace
